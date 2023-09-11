@@ -1,19 +1,44 @@
-# A very simple Flask Hello World app for you to get started with...
+import base64
+from contextlib import contextmanager
+from pathlib import Path
 
-from flask import Flask, request, jsonify
-
+import cv2
+import numpy as np
+import requests
+from flask import Flask, jsonify, request
+from flask_caching import Cache
 from flask_mysqlpool import MySQLPool as MySQL
 
-from contextlib import contextmanager
 import config
+from email_notification import send_email
+from twb_api_utils import (
+    get_nearest_villages_to_the_target_sorted_by_distance,
+    get_players,
+    get_tribe_players_id,
+    get_tribe_villages,
+    get_villages,
+    get_villages_per_player_id,
+)
+
+WORLD_VILLAGES_DIR = "mysite/tribalwarsbot/world_villages"
+WORLD_PLAYERS_DIR = "mysite/tribalwarsbot/world_players"
+WORLD_SETTINGS_DIR = "mysite/tribalwarsbot/world_settings"
 
 
 app = Flask(__name__)
+cache = Cache(
+    app,
+    config={
+        "CACHE_TYPE": "FileSystemCache",
+        "CACHE_DEFAULT_TIMEOUT": 3600,
+        "CACHE_DIR": "mysite/tmp",
+    },
+)
 
 
 if __name__ == "__main__":
-    import sshtunnel
     import MySQLdb
+    import sshtunnel
 
     sshtunnel.SSH_TIMEOUT = 5.0
     sshtunnel.TUNNEL_TIMEOUT = 5.0
@@ -82,10 +107,16 @@ def login():
             return "Bad request!", 400
         check_credentials = (
             f"SELECT * FROM Konta_Plemiona "
-            f"WHERE user_name = '{data['user_name']}' AND password = '{data['user_password']}'"
+            f"WHERE user_name = %(user_name)s AND password = %(user_password)s"
         )
         with open_connection() as cursor:
-            cursor.execute(check_credentials)
+            cursor.execute(
+                check_credentials,
+                {
+                    "user_name": data["user_name"],
+                    "user_password": data["user_password"],
+                },
+            )
             db_response = cursor.fetchone()
             if not db_response:
                 return "unauthorized", 401
@@ -149,13 +180,12 @@ def register():
 def logout():
     if request.method == "PATCH":
         data: dict = request.json
-        if "user_name" not in data or "captcha_counter" not in data:
+        if "user_name" not in data:
             return "Bad request!", 400
         with open_connection() as cursor:
             cursor.execute(
                 f"UPDATE Konta_Plemiona SET "
                 f"currently_running=0, "
-                f"captcha_solved=captcha_solved + {data['captcha_counter']}, "
                 f"last_logged = NOW() "
                 f"WHERE user_name='{data['user_name']}'"
             )
@@ -221,7 +251,7 @@ def user():
             return "Bad request!", 400
         update_account = (
             f"UPDATE Konta_Plemiona SET "
-            f"""{', '.join([f"{column}='{value}'" for column, value in data.items()])} """
+            f"""{', '.join([f"{column}={value}" for column, value in data.items()])} """
         )
         # If no args than make update for all
         if not request.args:
@@ -229,7 +259,7 @@ def user():
                 cursor.execute(update_account)
             return "", 204
 
-        # Filter using sql WHERE clouse
+        # Filter using sql WHERE
         data: dict = request.args.to_dict()
         if "operator" not in data and len(data) > 1:
             return "Bad request!", 400
@@ -297,6 +327,10 @@ def premium():
             f"SELECT bonus_add FROM Konta_Plemiona "
             f"WHERE user_name = '{data['user_name']}'"
         )
+        get_email_and_acc_expiration_date = (
+            f"SELECT email, active_until FROM Konta_Plemiona "
+            f"WHERE user_name = '{data['user_name']}'"
+        )
         with open_connection() as cursor:
             cursor.execute(add_premium)
             cursor.execute(get_bonus_add)
@@ -317,24 +351,204 @@ def premium():
                     f"WHERE user_name = (SELECT inv FROM (SELECT invited_by AS inv FROM Konta_Plemiona WHERE user_name = '{data['user_name']}') as tmp );"
                 )
                 cursor.execute(add_bonus_to_invited_by)
+            cursor.execute(get_email_and_acc_expiration_date)
+            email, active_until = cursor.fetchone()
 
-        return "", 204
+        send_email(
+            target=email,
+            subject="Potwierdzenie otrzymania zapłaty",
+            body=(
+                f"Dzięki za skorzystanie z moich usług.\n\n"
+                f"Mam nadzieję, że aplikacja spełni wszystkie Twoje oczekiwania.\n\n"
+                f"Twoje konto pozostanie aktywne do {active_until}\n\n"
+                f"W razie jakichkolwiek problemów proszę o kontakt na adres k.spec@tuta.io\n\n"
+                f"Udanego bocenia! :-)"
+            ),
+        )
+
+        return f"{active_until}"
 
 
+# Logging
 @app.route("/tribalwarsbot/api/v1/log", methods=["POST"])
 @check_token
-def save_log_v2():
-    with open(f"logs//{request.json['owner']}.txt", "a") as file:
-        file.write(f"{request.json['message']}\n")
+def save_log():
+    if "app_version" in request.json:
+        app_version = request.json["app_version"]
+        Path(f"logs//{app_version}").mkdir(exist_ok=True)
+        with open(f"logs//{app_version}//{request.json['owner']}.txt", "a") as file:
+            file.write(f"{request.json['message']}\n")
+    else:
+        with open(f"logs//{request.json['owner']}.txt", "a") as file:
+            file.write(f"{request.json['message']}\n")
     return "", 204
 
 
-@app.route("/log", methods=["POST"])
+# World settings file
+@app.route("/tribalwarsbot/api/v1/world/<path:path>", methods=["POST"])
 @check_token
-def save_log_v1():
-    with open(f"logs//{request.json['owner']}.txt", "a") as file:
-        file.write(f"{request.json['message']}\n")
-    return "", 204
+def world_settings(path):
+    if request.method == "POST":
+        with open(f"{WORLD_SETTINGS_DIR}//{path}.xml", "w") as file:
+            file.write(request.get_data(cache=False, as_text=True))
+        return "Ok", 200
+    else:
+        return "Bad request method", 400
+
+
+@app.route("/tribalwarsbot/api/v1/villages", methods=["GET"])
+@check_token
+def player_villages():
+    if request.method == "GET":
+        data = request.args.to_dict()
+        server_world = data["server_world"]
+
+        if cache.has(server_world):
+            if "player_id" in data:
+                return jsonify(cache.get(server_world)[data["player_id"]])
+            return cache.get(server_world)
+
+        if "server_url" in data:
+            response = requests.get(f"{data['server_url']}/map/village.txt")
+            if response.ok:
+                with open(f"{WORLD_VILLAGES_DIR}//{server_world}.txt", "w") as file:
+                    file.write(response.text)
+            villages = {}
+            for line in response.text.splitlines(keepends=False):
+                _, _, x, y, player_id, _, _ = line.split(",")
+                if player_id in villages:
+                    villages[player_id].append(f"{x}|{y}")
+                else:
+                    villages[player_id] = [f"{x}|{y}"]
+            cache.set(server_world, villages)
+
+            if "player_id" in data:
+                return jsonify(villages[data["player_id"]])
+            return villages
+
+        return "Bad request arguments", 422
+    else:
+        return "Bad request method", 400
+
+
+@app.route("/tribalwarsbot/api/v2/villages", methods=["GET"])
+@check_token
+def player_villages_v2():
+    if request.method == "GET":
+        data = request.args.to_dict()
+        server_world = data["server_world"]
+
+        # cache keys
+        villages_key = f"{server_world}_v"
+        villages_per_player_id_key = f"{server_world}_vpp"
+        players_key = f"{server_world}_players"
+
+        single_village = True if data.get("villages", "") == "1" else False
+        support_other = True if data.get("no_other_support", "0") == "0" else False
+        target = data.get("target", "")
+        tribe_id = data.get("tribe_id", "0")
+
+        if not cache.has(villages_key):
+            response = requests.get(f"{data['server_url']}/map/village.txt")
+            if response.ok:
+                parsed_villages: list[str] = response.text.splitlines(keepends=False)
+                with open(f"{WORLD_VILLAGES_DIR}//{server_world}.txt", "w") as file:
+                    file.write(response.text)
+            else:
+                with open(f"{WORLD_VILLAGES_DIR}//{server_world}.txt") as file:
+                    parsed_villages: list[str] = file.readlines()
+
+            cache.set(villages_key, get_villages(parsed_villages))
+            cache.set(
+                villages_per_player_id_key, get_villages_per_player_id(parsed_villages)
+            )
+
+        if single_village and not support_other and not cache.has(players_key):
+            response = requests.get(f"{data['server_url']}/map/player.txt")
+            if response.ok:
+                parsed_players = response.text.splitlines(keepends=False)
+                with open(f"{WORLD_PLAYERS_DIR}//{server_world}.txt", "w") as file:
+                    file.write(response.text)
+            else:
+                with open(f"{WORLD_PLAYERS_DIR}//{server_world}.txt") as file:
+                    parsed_players: list[str] = file.readlines()
+            cache.set(players_key, get_players(parsed_players))
+
+        if single_village:
+            if support_other:
+                return jsonify(
+                    get_nearest_villages_to_the_target_sorted_by_distance(
+                        target, villages=cache.get(villages_key)
+                    )
+                )
+            else:
+                return jsonify(
+                    get_nearest_villages_to_the_target_sorted_by_distance(
+                        target,
+                        villages=get_tribe_villages(
+                            get_tribe_players_id(tribe_id, cache.get(players_key)),
+                            cache.get(villages_per_player_id_key),
+                        ),
+                    )
+                )
+        else:
+            if "player_id" in data:
+                return jsonify(
+                    get_nearest_villages_to_the_target_sorted_by_distance(
+                        target, cache.get(villages_per_player_id_key)[data["player_id"]]
+                    )
+                )
+            return cache.get(villages_per_player_id_key)
+    else:
+        return "Bad request method", 400
+
+
+# World villages file
+@app.route("/tribalwarsbot/api/v1/villages/<path:path>", methods=["POST"])
+@check_token
+def world_villages(path):
+    if request.method == "POST":
+        with open(f"{WORLD_VILLAGES_DIR}//{path}.txt", "w") as file:
+            file.write(request.get_data(cache=False, as_text=True))
+        return "Ok", 200
+    else:
+        return "Bad request method", 400
+
+
+@app.route("/tribalwarsbot/api/v1/api_key/<string:key>", methods=["GET"])
+@check_token
+def get_api_key(key):
+    if request.method == "GET":
+        if key == "two_captcha":
+            return config.TWO_CAPTCHA_API_KEY, 200
+        return "There is no such key", 404
+    else:
+        return "Bad request method", 400
+
+
+@app.route("/tribalwarsbot/api/v1/concat_images", methods=["POST"])
+@check_token
+def concat_images():
+    images: dict = request.json
+
+    def get_cv2_image(image: str):
+        image = base64.b64decode(image.encode())
+        nparr = np.frombuffer(image, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if image.shape != (128, 128, 3):
+            image = cv2.resize(image, (128, 128))
+        return image
+
+    cv2_images = tuple(get_cv2_image(image) for image in images)
+
+    horizontly_joined_image = tuple(
+        cv2.hconcat(cv2_images[n : n + 3]) for n in range(0, 9, 3)
+    )
+    verticly_joined_images = cv2.vconcat(horizontly_joined_image)
+    hcaptcha_image = base64.b64encode(
+        cv2.imencode(".jpg", verticly_joined_images)[1]
+    ).decode()
+    return jsonify(hcaptcha_image)
 
 
 if __name__ == "__main__":
