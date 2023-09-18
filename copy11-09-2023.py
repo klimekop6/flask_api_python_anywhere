@@ -139,11 +139,15 @@ def register():
         select = f"SELECT * FROM Konta_Plemiona "
         operator = data.pop("operator", "")
         if "and" in operator:
-            select += "WHERE " + " AND ".join([f"{key} = %s" for key in data])
+            select += "WHERE " + " AND ".join(
+                [f"{key} = '{value}'" for key, value in data.items()]
+            )
         else:
-            select += "WHERE " + " OR ".join([f"{key} = %s" for key in data])
+            select += "WHERE " + " OR ".join(
+                [f"{key} = '{value}'" for key, value in data.items()]
+            )
         with open_connection() as cursor:
-            cursor.execute(select, tuple(data.values()))
+            cursor.execute(select)
             if cursor.fetchone():
                 return jsonify(no_exist=False)
             else:
@@ -155,18 +159,17 @@ def register():
             return "Bad request!", 400
         create_account = (
             f"INSERT INTO Konta_Plemiona({', '.join([str(key) for key in data])}) "
-            f"VALUES ({', '.join(['%s' for _ in range(len(data))])})"
+            f"""VALUES ({', '.join([f"'{value}'" for value in data.values()])})"""
         )
-
         with open_connection() as cursor:
-            cursor.execute(create_account, tuple(data.values()))
+            cursor.execute(create_account)
             set_default_account_values = (
                 f"UPDATE Konta_Plemiona SET "
                 f"active_since = DATE(NOW()), "
                 f"active_until = DATE_ADD(DATE(NOW()), INTERVAL 10 DAY) "
-                f"WHERE user_name = %(user_name)s"
+                f"WHERE user_name = '{data['user_name']}'"
             )
-            cursor.execute(set_default_account_values, {"user_name": data["user_name"]})
+            cursor.execute(set_default_account_values)
 
         return "Account has been created!", 201
 
@@ -184,8 +187,7 @@ def logout():
                 f"UPDATE Konta_Plemiona SET "
                 f"currently_running=0, "
                 f"last_logged = NOW() "
-                f"WHERE user_name = %(user_name)s",
-                {"user_name": data["user_name"]},
+                f"WHERE user_name='{data['user_name']}'"
             )
         return "", 204
 
@@ -200,15 +202,15 @@ def status():
             sql_str = (
                 f"UPDATE Konta_Plemiona "
                 f"SET currently_running=1, captcha_solved=captcha_solved + {data['captcha_counter']}, last_logged = NOW() "
-                f"WHERE user_name = %(user_name)s"
+                f"WHERE user_name='{data['user_name']}'"
             )
         else:
             sql_str = (
                 f"UPDATE Konta_Plemiona SET currently_running=1, last_logged = NOW() "
-                f"WHERE user_name = %(user_name)s"
+                f"WHERE user_name='{data['user_name']}'"
             )
         with open_connection() as cursor:
-            cursor.execute(sql_str, {"user_name": data["user_name"]})
+            cursor.execute(sql_str)
 
         return "", 204
 
@@ -224,11 +226,15 @@ def user():
         select = f"SELECT * FROM Konta_Plemiona "
         operator = data.pop("operator", "")
         if "and" in operator:
-            select += "WHERE " + " AND ".join([f"{key} = %s" for key in data])
+            select += "WHERE " + " AND ".join(
+                [f"{key} = '{value}'" for key, value in data.items()]
+            )
         else:
-            select += "WHERE " + " OR ".join([f"{key} = %s" for key in data])
+            select += "WHERE " + " OR ".join(
+                [f"{key} = '{value}'" for key, value in data.items()]
+            )
         with open_connection() as cursor:
-            cursor.execute(select, tuple(data.values()))
+            cursor.execute(select)
             db_response = cursor.fetchone()
             if not db_response:
                 return "There is no such user", 400
@@ -245,42 +251,31 @@ def user():
             return "Bad request!", 400
         update_account = (
             f"UPDATE Konta_Plemiona SET "
-            f"{', '.join([f'{column} = %s' for column in data])} "
+            f"""{', '.join([f"{column}={value}" for column, value in data.items()])} """
         )
         # If no args than make update for all
         if not request.args:
             with open_connection() as cursor:
-                cursor.execute(update_account, tuple(data.values()))
+                cursor.execute(update_account)
             return "", 204
+
         # Filter using sql WHERE
-        data2: dict = request.args.to_dict()
-        if "operator" not in data2 and len(data2) > 1:
+        data: dict = request.args.to_dict()
+        if "operator" not in data and len(data) > 1:
             return "Bad request!", 400
-        operator = data2.pop("operator", "")
+        operator = data.pop("operator", "")
         if "and" in operator:
-            update_account += "WHERE " + " AND ".join([f"{key} = %s" for key in data2])
-        else:
-            update_account += "WHERE " + " OR ".join([f"{key} = %s" for key in data2])
-        with open_connection() as cursor:
-            cursor.execute(
-                update_account,
-                tuple(v.strip("'") if isinstance(v, str) else v for v in data.values())
-                + tuple(data2.values()),
+            update_account += "WHERE " + " AND ".join(
+                [f"{key} = '{value}'" for key, value in data.items()]
             )
+        else:
+            update_account += "WHERE " + " OR ".join(
+                [f"{key} = '{value}'" for key, value in data.items()]
+            )
+        with open_connection() as cursor:
+            cursor.execute(update_account)
 
         return "", 204
-
-
-# Users
-@app.route("/tribalwarsbot/api/v1/users", methods=["GET"])
-@check_token
-def users():
-    if request.method == "GET":
-        select = f"SELECT user_name FROM Konta_Plemiona "
-        with open_connection() as cursor:
-            cursor.execute(select)
-            users = tuple(user[0] for user in cursor.fetchall())
-        return jsonify(users)
 
 
 # Bonus
@@ -295,19 +290,17 @@ def bonus():
         active_until_less_than_current_date = (
             f"UPDATE Konta_Plemiona "
             f"SET active_until = IF(active_until < DATE(NOW()), DATE_ADD(DATE(NOW()), INTERVAL 1 DAY), DATE_ADD(active_until, INTERVAL 1 DAY)) "
-            f"WHERE user_name = %(invited_by)s "
+            f"WHERE user_name = '{data['invited_by']}'"
         )
         set_email_bonus_add_status = (
             f"UPDATE Konta_Plemiona "
             f"SET bonus_email = 1 "
-            f"WHERE user_name = %(user_name)s "
+            f"WHERE user_name = '{data['user_name']}'"
         )
 
         with open_connection() as cursor:
-            cursor.execute(
-                active_until_less_than_current_date, {"invited_by": data["invited_by"]}
-            )
-            cursor.execute(set_email_bonus_add_status, {"user_name": data["user_name"]})
+            cursor.execute(active_until_less_than_current_date)
+            cursor.execute(set_email_bonus_add_status)
 
         return "", 204
 
@@ -328,25 +321,26 @@ def premium():
             f"  DATE_ADD(DATE(NOW()), INTERVAL {data['months']} MONTH), "
             f"  DATE_ADD(active_until, INTERVAL {data['months']} MONTH)"
             f") "
-            f"WHERE user_name = %(user_name)s"
+            f"WHERE user_name = '{data['user_name']}'"
         )
         get_bonus_add = (
-            f"SELECT bonus_add FROM Konta_Plemiona WHERE user_name = %(user_name)s"
+            f"SELECT bonus_add FROM Konta_Plemiona "
+            f"WHERE user_name = '{data['user_name']}'"
         )
         get_email_and_acc_expiration_date = (
             f"SELECT email, active_until FROM Konta_Plemiona "
-            f"WHERE user_name = %(user_name)s"
+            f"WHERE user_name = '{data['user_name']}'"
         )
         with open_connection() as cursor:
-            cursor.execute(add_premium, {"user_name": data["user_name"]})
-            cursor.execute(get_bonus_add, {"user_name": data["user_name"]})
+            cursor.execute(add_premium)
+            cursor.execute(get_bonus_add)
             if cursor.fetchone()[0] == 0:
                 set_bonus_add = (
                     f"UPDATE Konta_Plemiona "
                     f"SET bonus_add=1 "
-                    f"WHERE user_name = %(user_name)s;"
+                    f"WHERE user_name = '{data['user_name']}';"
                 )
-                cursor.execute(set_bonus_add, {"user_name": data["user_name"]})
+                cursor.execute(set_bonus_add)
                 add_bonus_to_invited_by = (
                     f"UPDATE Konta_Plemiona "
                     f"SET active_until=IF("
@@ -354,14 +348,10 @@ def premium():
                     f"  DATE_ADD(DATE(NOW()), INTERVAL 14 DAY), "
                     f"  DATE_ADD(active_until, INTERVAL 14 DAY)"
                     f") "
-                    f"WHERE user_name = (SELECT inv FROM (SELECT invited_by AS inv FROM Konta_Plemiona WHERE user_name = %(user_name)s) as tmp );"
+                    f"WHERE user_name = (SELECT inv FROM (SELECT invited_by AS inv FROM Konta_Plemiona WHERE user_name = '{data['user_name']}') as tmp );"
                 )
-                cursor.execute(
-                    add_bonus_to_invited_by, {"user_name": data["user_name"]}
-                )
-            cursor.execute(
-                get_email_and_acc_expiration_date, {"user_name": data["user_name"]}
-            )
+                cursor.execute(add_bonus_to_invited_by)
+            cursor.execute(get_email_and_acc_expiration_date)
             email, active_until = cursor.fetchone()
 
         send_email(
