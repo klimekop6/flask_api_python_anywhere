@@ -337,8 +337,13 @@ def premium():
             f"SELECT email, active_until FROM Konta_Plemiona "
             f"WHERE user_name = %(user_name)s"
         )
+        write_to_payment_logs = (
+            f"INSERT INTO Payments (user_name, months) VALUES (%s, %s)"
+        )
         with open_connection() as cursor:
             cursor.execute(add_premium, {"user_name": data["user_name"]})
+            if not cursor.rowcount:
+                return f"User {data['user_name']} does not exist", 404
             cursor.execute(get_bonus_add, {"user_name": data["user_name"]})
             if cursor.fetchone()[0] == 0:
                 set_bonus_add = (
@@ -359,6 +364,7 @@ def premium():
                 cursor.execute(
                     add_bonus_to_invited_by, {"user_name": data["user_name"]}
                 )
+            cursor.execute(write_to_payment_logs, (data["user_name"], data["months"]))
             cursor.execute(
                 get_email_and_acc_expiration_date, {"user_name": data["user_name"]}
             )
@@ -559,6 +565,18 @@ def concat_images():
         cv2.imencode(".jpg", verticly_joined_images)[1]
     ).decode()
     return jsonify(hcaptcha_image)
+
+
+@app.route("/tribalwarsbot/api/v1/stats/<string:key>", methods=["GET"])
+@check_token
+def stats(key):
+    if key == "online":
+        with open_connection() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM Konta_Plemiona WHERE currently_running = 1"
+            )
+            players_online = str(cursor.fetchone()[0])
+        return players_online, 200
 
 
 if __name__ == "__main__":
