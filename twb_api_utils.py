@@ -1,6 +1,3 @@
-import requests
-
-
 def get_villages(lines: list[str]) -> list[str]:
     villages = []
     for line in lines:
@@ -55,4 +52,3 @@ def get_nearest_villages_to_the_target_sorted_by_distance(
         key=lambda village: pow(target_x - int(village[:3]), 2)
         + pow(target_y - int(village[4:]), 2),
     )[:top]
-
